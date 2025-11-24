@@ -1,0 +1,6 @@
+flask==3.0.0
+aspose.slides>=24.6.0
+google-genai>=0.2.0
+python-dotenv==1.0.0
+Pillow==10.1.0
+
