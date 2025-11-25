@@ -58,14 +58,17 @@ def process_presentation():
             logger.error(f"ERROR: Invalid file type - {file.filename}")
             return jsonify({'error': 'File must be a .pptx file'}), 400
         
-        # Get user prompt
+        # Get user prompt and model selection
         user_prompt = request.form.get('prompt', '')
         if not user_prompt:
             logger.error("ERROR: No prompt provided")
             return jsonify({'error': 'Prompt is required'}), 400
         
+        # Get model selection (default: gemini-2.5-flash)
+        model_name = request.form.get('model', 'gemini-2.5-flash')
         logger.info(f"File: {file.filename}")
         logger.info(f"Prompt: {user_prompt}")
+        logger.info(f"Model: {model_name}")
         logger.info(f"File size: {len(file.read())} bytes")
         file.seek(0)  # Reset file pointer
         
@@ -88,9 +91,9 @@ def process_presentation():
         # Phase 1: Analyze slide and research content
         phase_start = time.time()
         logger.info("-" * 80)
-        logger.info("PHASE 1/3: Vision Analysis & Research (Gemini 2.5 Flash)")
+        logger.info(f"PHASE 1/3: Vision Analysis & Research ({model_name})")
         logger.info("  → Loading PPTX and rendering slide to PNG...")
-        logger.info("  → Sending to Gemini 2.5 Flash with Google Search...")
+        logger.info(f"  → Sending to {model_name} with Google Search...")
         logger.info("  → This may take 30-90 seconds depending on research complexity...")
         
         elapsed = time.time() - start_time
@@ -98,7 +101,7 @@ def process_presentation():
         eta = datetime.now() + timedelta(seconds=estimated_total - elapsed)
         logger.info(f"  → Estimated completion: {eta.strftime('%H:%M:%S')} (ETA: ~{estimated_total - elapsed:.0f}s)")
         
-        json_instructions = analyze_slide_and_research(input_path, user_prompt)
+        json_instructions = analyze_slide_and_research(input_path, user_prompt, model_name=model_name)
         
         phase_time = time.time() - phase_start
         logger.info(f"✓ Phase 1 completed in {phase_time:.2f}s")

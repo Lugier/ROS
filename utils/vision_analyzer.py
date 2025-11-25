@@ -37,7 +37,7 @@ def extract_json_from_text(text):
     return text
 
 
-def analyze_slide_and_research(pptx_path, user_prompt):
+def analyze_slide_and_research(pptx_path, user_prompt, model_name='gemini-2.5-flash'):
     """
     Analyzes the first slide of a PPTX file using Gemini Vision,
     researches content using Google Search, and returns JSON instructions.
@@ -47,6 +47,8 @@ def analyze_slide_and_research(pptx_path, user_prompt):
     Args:
         pptx_path: Path to the PPTX template file
         user_prompt: User's prompt for content adaptation
+        model_name: Gemini model to use (default: 'gemini-2.5-flash')
+                   Options: 'gemini-2.5-flash', 'gemini-3-pro-preview'
         
     Returns:
         dict: JSON instructions with replacements, charts, and think_cell_replacements
@@ -108,43 +110,77 @@ def analyze_slide_and_research(pptx_path, user_prompt):
     step_time = time.time() - step_start
     logger.info(f"    [Step B+C] ✓ Configuration completed in {step_time:.2f}s")
     
-    # Step D: Prepare system prompt (Stricter JSON rules)
-    system_prompt = f"""You are a Presentation Architect. 
+    # Step D: Prepare system prompt (Senior Consultant Role + Layout Fidelity + Position Mapping)
+    # WICHTIG: Dieser Prompt ist für "Consulting-Qualität" optimiert:
+    # - Rolle als Senior Consultant bei MBB (McKinsey/BCG/Bain)
+    # - Layout-Treue: Textlängen, Bullet-Anzahl spiegeln
+    # - Position-Hints für besseres Chart-Mapping
+    system_prompt = f"""You are a Senior Consultant and Presentation Architect at a top-tier strategy firm (McKinsey, BCG, Bain).
 
-TASK:
+**YOUR MISSION:**
 
-1. Visually analyze the slide layout, colors, and charts.
+You are automating the creation of high-quality slide decks. The user provides a "Template Slide" (image) and a "New Topic" (prompt).
 
-2. Research specific data for: '{user_prompt}'.
+Your job is to **adapt the content** of the template to the new topic while strictly **preserving the layout, text density, and structure**.
 
-3. Generate a JSON response to adapt the slide.
+**USER PROMPT:** "{user_prompt}"
 
-CRITICAL JSON RULES:
+**STRICT RULES FOR ADAPTATION:**
 
+1. **VISUAL & LAYOUT INTEGRITY (CRITICAL):**
+   * **Text Length:** If a headline has 10 words in the image, your new headline MUST have ~8-12 words. Do not write paragraphs where there were bullet points.
+   * **Bullet Points:** If a text box has 3 bullet points, generate exactly 3 bullet points for the new topic.
+   * **Language:** Output in **German** (unless the prompt implies English).
+
+2. **RESEARCH & DATA:**
+   * Use Google Search to find **REAL, CURRENT DATA** for the new topic.
+   * **Do NOT invent numbers.** If you can't find exact 2024 data, use the latest available and label it (e.g., "2023").
+   * **Update Charts:** You MUST identify every chart on the slide and provide new data for it.
+
+3. **CHART ORDERING (CRITICAL FOR MAPPING):**
+   * The "charts" array in your JSON must list charts in the order they appear on the slide: **Top-Left -> Top-Right -> Bottom-Left -> Bottom-Right**.
+   * If you see a Bar Chart on the left and a Pie Chart on the right, the first entry in JSON must be the Bar Chart data, the second must be the Pie Chart data.
+   * **Include "position_hint"** in each chart entry to help the renderer match correctly: "top-left", "top-right", "bottom-left", "bottom-right", or "center".
+
+**CRITICAL JSON RULES:**
 - Use valid JSON syntax.
 - Escape double quotes inside strings (e.g., "The \\"Big 4\\" firms").
 - Do not add trailing commas.
 - Return ONLY the JSON object. No explanations, no markdown code blocks.
 
-OUTPUT SCHEMA:
+**OUTPUT SCHEMA (JSON ONLY):**
 
 {{
    "replacements": [
-      {{"old_text_snippet": "exact text from slide", "new_text": "adapted text"}}
+      {{
+         "old_text_snippet": "exact start of text from image (first 5-10 words)", 
+         "new_text": "new adapted text matching length and style"
+      }}
    ],
    "charts": [
       {{
-         "type": "bar/column/line", 
-         "title": "Chart Title", 
+         "position_hint": "top-left", 
+         "type": "column/bar/line/pie", 
+         "title": "New Chart Title", 
          "data": {{
-            "categories": ["2023", "2024"], 
+            "categories": ["2023", "2024", "2025"], 
             "series": [
-               {{"name": "Series 1", "values": [10, 20], "color_hex": "#FF0000"}}
+               {{"name": "Revenue", "values": [10.5, 22.0, 35.5], "color_hex": "#HEX_FROM_IMAGE"}}
+            ]
+         }}
+      }},
+      {{
+         "position_hint": "top-right",
+         "type": "pie",
+         "title": "Market Share 2024",
+         "data": {{
+            "categories": ["Segment A", "Segment B", "Segment C"],
+            "series": [
+               {{"name": "Share", "values": [0.45, 0.35, 0.20], "color_hex": "#76B900"}}
             ]
          }}
       }}
-   ],
-   "think_cell_replacements": true
+   ]
 }}"""
 
     # Step E: Prepare and send to Gemini
@@ -158,9 +194,8 @@ OUTPUT SCHEMA:
         image_size = f"{image.size[0]}x{image.size[1]}"
         logger.info(f"    [Step D] ✓ Image loaded: {image_size} pixels")
         
-        # Model name - Gemini 2.5 Flash for better availability and speed
-        model_name = "gemini-2.5-flash"
-        
+        # Model name from parameter (default: gemini-2.5-flash)
+        # WICHTIG: model_name wird als Parameter übergeben, nicht mehr hardcodiert
         logger.info(f"    [Step D] Using model: {model_name}")
         logger.info("    [Step D] Sending request to Gemini (this may take 30-90s)...")
         logger.info("    [Step D] → Performing vision analysis...")

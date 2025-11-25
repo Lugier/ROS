@@ -412,10 +412,26 @@ def hex_to_argb(hex_color):
 
 
 def replace_ole_with_chart(slide, shape, chart_data):
-    """Replaces an OLE object with a native PowerPoint chart."""
+    """
+    Replaces a shape (OLE object or native chart) with a new native PowerPoint chart.
+    
+    WICHTIG: Diese Funktion funktioniert sowohl mit:
+    - OLE Objects (Think-Cell Charts)
+    - Native PowerPoint Charts (IChart)
+    
+    Args:
+        slide: Aspose Slide Objekt
+        shape: Shape zu ersetzen (OLE oder IChart)
+        chart_data: Dict mit chart data aus Gemini JSON
+    """
     chart_type_str = chart_data.get('type', 'column')
     chart_title = chart_data.get('title', 'Untitled')
-    logger.info(f"      → Replacing OLE object with {chart_type_str} chart: '{chart_title}'...")
+    
+    # Determine shape type for logging
+    # WICHTIG: IChart ist nicht direkt importierbar, daher prüfen wir über hasattr
+    is_native_chart = hasattr(shape, 'chart_data') and hasattr(shape, 'chart_type')
+    shape_type = "native chart" if is_native_chart else "OLE object"
+    logger.info(f"      → Replacing {shape_type} with {chart_type_str} chart: '{chart_title}'...")
 
     # 1. Geometrie
     x, y, width, height = shape.x, shape.y, shape.width, shape.height
@@ -433,7 +449,9 @@ def replace_ole_with_chart(slide, shape, chart_data):
 
     # 2. Typ
     c_type_lower = str(chart_type_str).lower()
-    if 'bar' in c_type_lower:
+    if 'pie' in c_type_lower or 'donut' in c_type_lower:
+        chart_type = slides.charts.ChartType.PIE
+    elif 'bar' in c_type_lower:
         chart_type = slides.charts.ChartType.CLUSTERED_BAR
     elif 'line' in c_type_lower:
         chart_type = slides.charts.ChartType.LINE
@@ -448,16 +466,21 @@ def replace_ole_with_chart(slide, shape, chart_data):
     chart_data_obj = chart.chart_data
     workbook = chart_data_obj.chart_data_workbook
 
+    # Clear existing data
     chart_data_obj.series.clear()
     chart_data_obj.categories.clear()
 
-    # Debug Data
+    # Extract data from JSON
     categories = chart_data.get('data', {}).get('categories', [])
     series_list = chart_data.get('data', {}).get('series', [])
+    
     logger.info(f"        Data: {len(categories)} categories, {len(series_list)} series")
+    logger.info(f"        Categories: {categories}")
+    logger.info(f"        Series: {[s.get('name', 'Unknown') for s in series_list]}")
 
     if not categories or not series_list:
         logger.warning("        ⚠️ No categories or series data provided!")
+        return
 
     # Aspose Chart Data Structure:
     # Excel-like layout:
@@ -470,25 +493,39 @@ def replace_ole_with_chart(slide, shape, chart_data):
     # Series Names: Row 0, Col 1..N
     # Values: Row 1..N, Col 1..N
 
-    # Categories (Row 1..N, Col 0)
+    # WICHTIG: Zuerst alle Daten in die Workbook-Zellen schreiben, dann Series hinzufügen
+    # Dies stellt sicher, dass die Daten korrekt gesetzt werden
+    
+    # Step 1: Write categories to workbook (Row 1..N, Col 0)
+    logger.info(f"        → Writing {len(categories)} categories to workbook...")
+    category_cells = []
     for i, cat in enumerate(categories):
         # Row = i+1 (start at 1), Col = 0
         cell = workbook.get_cell(0, i + 1, 0, str(cat))
+        category_cells.append(cell)
+        logger.info(f"        ✓ Category {i+1}/{len(categories)}: '{cat}' written to (row {i+1}, col 0)")
+    
+    # Add all categories at once
+    for cell in category_cells:
         chart_data_obj.categories.add(cell)
-        logger.debug(f"        Category {i}: '{cat}' at (row {i+1}, col 0)")
-
-    # Series
+    
+    # Step 2: Write series names and values to workbook first
+    logger.info(f"        → Writing series data to workbook...")
+    series_data = []
     for series_idx, s_data in enumerate(series_list):
         s_name = s_data.get('name', f'Series {series_idx + 1}')
         s_vals = s_data.get('values', [])
         s_color = s_data.get('color_hex', '#000000')
-
-        # Series Name: Row 0, Col = series_idx + 1
+        
+        logger.info(f"        → Writing series {series_idx + 1}: '{s_name}' with {len(s_vals)} values")
+        logger.info(f"          Values: {s_vals}")
+        
+        # Write series name: Row 0, Col = series_idx + 1
         series_name_cell = workbook.get_cell(0, 0, series_idx + 1, str(s_name))
-        series = chart_data_obj.series.add(series_name_cell, chart_type)
-        logger.debug(f"        Series {series_idx}: '{s_name}' at (row 0, col {series_idx + 1})")
-
-        # Add Values: Row = cat_idx + 1, Col = series_idx + 1
+        logger.info(f"        ✓ Series name '{s_name}' written to (row 0, col {series_idx + 1})")
+        
+        # Write all values for this series: Row = cat_idx + 1, Col = series_idx + 1
+        value_cells = []
         for cat_idx, val in enumerate(s_vals):
             if cat_idx < len(categories):
                 try:
@@ -496,22 +533,77 @@ def replace_ole_with_chart(slide, shape, chart_data):
                 except (ValueError, TypeError):
                     val_float = 0.0
                     logger.warning(f"        ⚠️ Invalid value '{val}' for category {cat_idx}, using 0.0")
-
-                # Value Cell: Row = cat_idx + 1, Col = series_idx + 1
+                
+                # Write value to workbook cell
                 data_cell = workbook.get_cell(0, cat_idx + 1, series_idx + 1, val_float)
-                logger.debug(f"        Value: {val_float} at (row {cat_idx+1}, col {series_idx+1})")
-
-                # Add Point based on chart type
-                if chart_type == slides.charts.ChartType.LINE:
+                value_cells.append(data_cell)
+                logger.info(f"        ✓ Value {val_float} written to (row {cat_idx+1}, col {series_idx+1}) for category '{categories[cat_idx]}'")
+        
+        series_data.append({
+            'name': s_name,
+            'name_cell': series_name_cell,
+            'value_cells': value_cells,
+            'color': s_color
+        })
+    
+    # Step 3: Now add series to chart (data is already in workbook)
+    logger.info(f"        → Adding series to chart...")
+    for series_idx, s_info in enumerate(series_data):
+        # Add series using the name cell (data is already in workbook)
+        series = chart_data_obj.series.add(s_info['name_cell'], chart_type)
+        logger.info(f"        ✓ Series '{s_info['name']}' added to chart")
+        
+        # Add data points using the pre-written cells
+        # WICHTIG: Wir verwenden die Zellen, die bereits in der Workbook geschrieben wurden
+        values_added = 0
+        for idx, data_cell in enumerate(s_info['value_cells']):
+            try:
+                # Methode 1: Standard Aspose API
+                if chart_type == slides.charts.ChartType.PIE:
+                    series.data_points.add_data_point_for_pie_series(data_cell)
+                elif chart_type == slides.charts.ChartType.LINE:
                     series.data_points.add_data_point_for_line_series(data_cell)
                 else:
                     series.data_points.add_data_point_for_bar_series(data_cell)
-
-        # Color
-        series.format.fill.fill_type = slides.FillType.SOLID
-        a, r, g, b = hex_to_argb(s_color)
-        series.format.fill.solid_fill_color.color = drawing.Color.from_argb(a, r, g, b)
-        logger.debug(f"        Color applied: {s_color} -> ARGB({a}, {r}, {g}, {b})")
+                values_added += 1
+                logger.debug(f"        → Data point {idx+1} added via API")
+            except Exception as e:
+                logger.warning(f"        ⚠️ API method failed for data point {idx+1}, trying alternative: {e}")
+                # Methode 2: Alternative - direkt über data_points[index]
+                try:
+                    if series.data_points.count > idx:
+                        # Falls bereits ein DataPoint existiert, ersetze ihn
+                        dp = series.data_points[idx]
+                        dp.value.data = data_cell
+                    else:
+                        # Sonst füge neuen hinzu
+                        if chart_type == slides.charts.ChartType.PIE:
+                            series.data_points.add_data_point_for_pie_series(data_cell)
+                        elif chart_type == slides.charts.ChartType.LINE:
+                            series.data_points.add_data_point_for_line_series(data_cell)
+                        else:
+                            series.data_points.add_data_point_for_bar_series(data_cell)
+                    values_added += 1
+                    logger.debug(f"        → Data point {idx+1} added via alternative method")
+                except Exception as e2:
+                    logger.error(f"        ✗ Both methods failed for data point {idx+1}: {e2}")
+        
+        logger.info(f"        ✓ Series '{s_info['name']}' completed: {values_added}/{len(s_info['value_cells'])} data points added")
+        
+        # Verify data was set correctly
+        if values_added > 0:
+            logger.info(f"        ✓ Verified: Series has {series.data_points.count} data points")
+        else:
+            logger.error(f"        ✗ WARNING: No data points were added to series '{s_info['name']}'!")
+        
+        # Set color
+        try:
+            series.format.fill.fill_type = slides.FillType.SOLID
+            a, r, g, b = hex_to_argb(s_info['color'])
+            series.format.fill.solid_fill_color.color = drawing.Color.from_argb(a, r, g, b)
+            logger.info(f"        ✓ Color applied: {s_info['color']} -> ARGB({a}, {r}, {g}, {b})")
+        except Exception as e:
+            logger.warning(f"        ⚠️ Could not set color {s_info['color']}: {e}")
 
     # Title
     if chart_data.get('title'):
@@ -556,18 +648,51 @@ def process_slide(pptx_path, output_path, json_instructions):
     charts = json_instructions.get('charts', [])
     if charts:
         logger.info(f"      → Processing {len(charts)} chart replacements...")
-        ole_shapes = []
+        
+        # --- INTELLIGENT MAPPING STRATEGY ---
+        # Wir finden alle Kandidaten und sortieren sie nach Position (Oben->Unten, Links->Rechts)
+        # Damit matchen wir die Logik aus dem Prompt (Top-Left -> Bottom-Right).
+        
+        # Find ALL chart candidates: OLE objects (Think-Cell) AND native PowerPoint charts
+        chart_candidates = []
         for shape in slide.shapes:
+            # Check for OLE objects (Think-Cell charts)
             if hasattr(slides, 'OleObjectFrame') and isinstance(shape, slides.OleObjectFrame):
-                ole_shapes.append(shape)
+                chart_candidates.append(shape)
+                logger.debug(f"      → Found OLE object (Think-Cell chart) at (X={shape.x:.0f}, Y={shape.y:.0f})")
             elif hasattr(shape, 'ole_format'):
-                ole_shapes.append(shape)
+                chart_candidates.append(shape)
+                logger.debug(f"      → Found OLE object (via ole_format) at (X={shape.x:.0f}, Y={shape.y:.0f})")
+            # Check for native PowerPoint charts
+            # WICHTIG: IChart ist nicht direkt importierbar, daher prüfen wir über hasattr
+            elif hasattr(shape, 'chart_data') and hasattr(shape, 'chart_type'):
+                chart_candidates.append(shape)
+                logger.debug(f"      → Found native PowerPoint chart at (X={shape.x:.0f}, Y={shape.y:.0f})")
 
-        logger.info(f"      → Found {len(ole_shapes)} OLE object(s)")
+        logger.info(f"      → Found {len(chart_candidates)} chart candidate(s) on slide (OLE + native)")
+        
+        # --- POSITION-BASED SORTING ---
+        # Sortieren: Zuerst nach Y (Zeile), dann nach X (Spalte)
+        # Wir nutzen eine einfache "Reading Order" Logik: Y*1000 + X
+        # Dies sortiert von oben nach unten, und bei gleicher Y-Position von links nach rechts
+        chart_candidates.sort(key=lambda s: (int(s.y / 50) * 1000 + s.x))
+        
+        logger.info(f"      → Sorted {len(chart_candidates)} charts by position (Top-Left -> Bottom-Right)")
+        for idx, candidate in enumerate(chart_candidates):
+            logger.debug(f"        Chart {idx+1}: Position (X={candidate.x:.0f}, Y={candidate.y:.0f})")
 
-        for i, ole_shape in enumerate(ole_shapes):
+        # Match and replace charts
+        # WICHTIG: Die Charts sind jetzt sortiert (Top-Left -> Bottom-Right)
+        # Die AI-Daten sollten auch in dieser Reihenfolge sein (laut Prompt)
+        # Falls mehr Charts gefunden werden als in JSON, verwenden wir nur die ersten N
+        for i, chart_shape in enumerate(chart_candidates):
             if i < len(charts):
-                replace_ole_with_chart(slide, ole_shape, charts[i])
+                chart_data = charts[i]
+                position_hint = chart_data.get('position_hint', 'unknown')
+                logger.info(f"      → Replacing chart {i+1}/{len(chart_candidates)} (AI hint: '{position_hint}') with data from AI...")
+                replace_ole_with_chart(slide, chart_shape, chart_data)
+            else:
+                logger.warning(f"      ⚠️ More charts found ({len(chart_candidates)}) than AI provided ({len(charts)})")
     else:
         logger.info("      → No chart replacements to apply")
 
