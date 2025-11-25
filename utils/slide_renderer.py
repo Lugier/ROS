@@ -17,103 +17,92 @@ def normalize_string(s):
 
 def replace_text_in_slide(slide, replacements):
     """
-    Replaces text using 'Paragraph Level' replacement to handle broken portions.
+    Replaces text using tolerant fuzzy matching.
     """
     logger.info(f"      → Processing {len(replacements)} text replacements...")
     replacement_count = 0
-
-    # Pre-process replacements for faster lookups
-    # Wir nutzen eine Liste von Tupeln für (clean_old, new)
+    
+    # Debug: Was soll ersetzt werden?
     clean_replacements = []
     for r in replacements:
         old = r.get('old_text_snippet', '')
         new = r.get('new_text', '')
         if old and new:
-            # Normalize: lowercase, single spaces
-            clean_old = " ".join(old.split()).lower()
-            clean_replacements.append((clean_old, new))
-
-    def process_shape(shape):
+            clean_old = normalize_string(old)
+            # Wir speichern nur Snippets die lang genug sind, um False Positives zu vermeiden
+            if len(clean_old) > 10: 
+                clean_replacements.append((clean_old, new, old))  # Speichern auch das Original für Debug
+    
+    def process_text_frame(text_frame):
         nonlocal replacement_count
-
+        if not text_frame or not text_frame.paragraphs:
+            return
+        for paragraph in text_frame.paragraphs:
+            full_text = paragraph.text
+            clean_full_text = normalize_string(full_text)
+            
+            # Debug: Logge gefundene Texte (nur wenn lang genug)
+            if len(clean_full_text) >= 10:
+                logger.debug(f"        [DEBUG] Found text in slide: '{full_text[:50]}...'")
+            
+            # Wenn der Paragraph leer ist, überspringen
+            if len(clean_full_text) < 5: 
+                continue
+            
+            # Prüfen gegen alle Ersetzungen
+            for clean_old, new_text, orig_old in clean_replacements:
+                
+                # Match Logic:
+                # 1. Exakter (normalisierter) Match
+                # 2. Substring Match (wenn der Suchtext im Absatz vorkommt)
+                # 3. Similarity Match (Token Overlap - für harte Fälle)
+                
+                is_match = False
+                
+                if clean_old in clean_full_text:
+                    is_match = True
+                else:
+                    # Token Match: Wenn > 80% der Wörter vorkommen (in beliebiger Reihenfolge)
+                    old_tokens = set(clean_old.split())
+                    para_tokens = set(clean_full_text.split())
+                    if len(old_tokens) > 0:
+                        common = old_tokens.intersection(para_tokens)
+                        overlap = len(common) / len(old_tokens)
+                        if overlap > 0.8: 
+                            is_match = True
+                
+                if is_match:
+                    logger.info(f"        ✓ Match found!\n          Search: '{orig_old[:30]}...'\n          Found in: '{full_text[:30]}...'")
+                    
+                    # Replace Logic
+                    if len(paragraph.portions) > 0:
+                        paragraph.portions[0].text = new_text
+                        # Remove others
+                        while len(paragraph.portions) > 1:
+                            paragraph.portions.remove_at(1)
+                            
+                        replacement_count += 1
+                        return  # Nur eine Ersetzung pro Absatz, break loop
+    
+    def process_shape(shape):
         # 1. Text Frames
-        if hasattr(shape, "text_frame") and shape.text_frame:
-            for paragraph in shape.text_frame.paragraphs:
-                # Holen wir den GESAMTEN Text des Absatzes
-                full_text = paragraph.text
-                clean_full_text = " ".join(full_text.split()).lower()
-
-                # Prüfen gegen alle Ersetzungen
-                for clean_old, new_text in clean_replacements:
-                    # Fuzzy Match: Ist der alte Text (bereinigt) im Absatz enthalten?
-                    # Wir nutzen eine Schwelle von 80% Ähnlichkeit oder Substring
-                    if clean_old in clean_full_text and len(clean_old) > 5:
-
-                        logger.info(f"        ✓ Match found: '{clean_old[:30]}...' inside '{clean_full_text[:50]}...'")
-
-                        # ACTION: Wir löschen alle Portions und setzen EINE neue.
-                        # Das killt zwar bunte Wörter mitten im Satz, aber garantiert den neuen Text.
-
-                        # 1. Speichere Formatierung der ersten Portion (als "Master Style")
-                        if len(paragraph.portions) > 0:
-                            first_portion = paragraph.portions[0]
-                            # Text setzen
-                            first_portion.text = new_text
-
-                            # 2. Alle anderen Portions löschen (sie sind jetzt obsolet)
-                            # Aspose Python API: portions.remove() oder remove_at()
-                            try:
-                                # Versuche remove_at() falls verfügbar
-                                while len(paragraph.portions) > 1:
-                                    if hasattr(paragraph.portions, 'remove_at'):
-                                        paragraph.portions.remove_at(1)
-                                    else:
-                                        # Fallback: remove() mit Objekt
-                                        paragraph.portions.remove(paragraph.portions[1])
-                            except (AttributeError, IndexError) as e:
-                                # Falls remove_at nicht existiert, nutze remove()
-                                while len(paragraph.portions) > 1:
-                                    paragraph.portions.remove(paragraph.portions[1])
-
-                            replacement_count += 1
-                            logger.info(f"        ✓ Paragraph replaced: '{new_text[:30]}...'")
-                            break  # Nur eine Ersetzung pro Absatz
-
+        if hasattr(shape, "text_frame"):
+            process_text_frame(shape.text_frame)
         # 2. Groups
         if isinstance(shape, IGroupShape):
             for child in shape.shapes:
                 process_shape(child)
-
         # 3. Tables
         if isinstance(shape, ITable):
             for row in shape.rows:
                 for cell in row:
                     if cell.text_frame:
-                        for paragraph in cell.text_frame.paragraphs:
-                            # Gleiche Logik für Tabellen-Zellen
-                            full_text = paragraph.text
-                            clean_full_text = " ".join(full_text.split()).lower()
-
-                            for clean_old, new_text in clean_replacements:
-                                if clean_old in clean_full_text and len(clean_old) > 5:
-                                    if len(paragraph.portions) > 0:
-                                        paragraph.portions[0].text = new_text
-                                        try:
-                                            while len(paragraph.portions) > 1:
-                                                if hasattr(paragraph.portions, 'remove_at'):
-                                                    paragraph.portions.remove_at(1)
-                                                else:
-                                                    paragraph.portions.remove(paragraph.portions[1])
-                                        except (AttributeError, IndexError):
-                                            while len(paragraph.portions) > 1:
-                                                paragraph.portions.remove(paragraph.portions[1])
-                                        replacement_count += 1
-                                        logger.info(f"        ✓ Table Match: '{clean_old[:20]}...'")
-                                        break
-
+                        process_text_frame(cell.text_frame)
+    
+    # Iterate
     for shape in slide.shapes:
         process_shape(shape)
-
+        
     logger.info(f"      ✓ Completed {replacement_count} text replacements")
 
 

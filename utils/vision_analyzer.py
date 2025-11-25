@@ -107,7 +107,7 @@ def analyze_slide_and_research(pptx_path, user_prompt):
     step_time = time.time() - step_start
     logger.info(f"    [Step B+C] ✓ Configuration completed in {step_time:.2f}s")
     
-    # Step D: Prepare system prompt (Wir müssen jetzt stärker auf JSON bestehen!)
+    # Step D: Prepare system prompt (Stricter JSON rules)
     system_prompt = f"""You are a Presentation Architect. 
 
 TASK:
@@ -118,16 +118,18 @@ TASK:
 
 3. Generate a JSON response to adapt the slide.
 
+CRITICAL JSON RULES:
+
+- Use valid JSON syntax.
+- Escape double quotes inside strings (e.g., "The \\"Big 4\\" firms").
+- Do not add trailing commas.
+- Return ONLY the JSON object. No explanations, no markdown code blocks.
+
 OUTPUT SCHEMA:
-
-You MUST return a valid JSON object. Do NOT write any text outside the JSON block.
-Start with {{ and end with }}.
-
-JSON Structure:
 
 {{
    "replacements": [
-      {{"old_text_snippet": "exact text to find", "new_text": "new adapted text"}}
+      {{"old_text_snippet": "exact text from slide", "new_text": "adapted text"}}
    ],
    "charts": [
       {{
@@ -136,15 +138,13 @@ JSON Structure:
          "data": {{
             "categories": ["2023", "2024"], 
             "series": [
-               {{"name": "Revenue", "values": [100, 200], "color_hex": "#FF0000"}}
+               {{"name": "Series 1", "values": [10, 20], "color_hex": "#FF0000"}}
             ]
          }}
       }}
    ],
    "think_cell_replacements": true
-}}
-
-CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks, no text before or after."""
+}}"""
 
     # Step E: Prepare and send to Gemini
     step_start = time.time()
@@ -188,7 +188,7 @@ CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks,
     except Exception as e:
         logger.warning(f"    [Step D] ⚠️ Could not delete temp PNG (ignoring): {e}")
     
-    # --- ROBUST JSON PARSING (FIXED) ---
+    # --- ROBUST JSON PARSING WITH REPAIR ATTEMPTS ---
     logger.info("    [Step D] Parsing JSON response...")
     response_text = response.text.strip()
 
@@ -196,7 +196,7 @@ CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks,
         # 1. Clean string mit der Funktion (entfernt Markdown-Code-Blöcke)
         json_str = extract_json_from_text(response_text)
         
-        # 2. Parse
+        # 2. Try to parse
         json_instructions = json.loads(json_str)
         
         # 3. Validate structure
@@ -204,6 +204,19 @@ CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks,
             logger.warning("    [Step D] ⚠️ JSON valid but keys missing (replacements/charts)")
         
         logger.info(f"    [Step D] ✓ JSON parsed successfully ({len(str(json_instructions))} chars)")
+        
+        # --- NEW: Print JSON to Console ---
+        print("\n" + "="*60)
+        print("🟢 GEMINI AI RESPONSE (DEBUG VIEW)")
+        print("="*60)
+        json_preview = json.dumps(json_instructions, indent=2, ensure_ascii=False)
+        # Truncate if too long for console
+        if len(json_preview) > 1000:
+            print(json_preview[:1000] + "... (truncated)")
+        else:
+            print(json_preview)
+        print("="*60 + "\n")
+        # ----------------------------------
         
         # --- DEBUG: Save JSON to inspect ---
         debug_json_path = pptx_path + ".debug.json"
@@ -218,12 +231,69 @@ CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks,
 
     except json.JSONDecodeError as e:
         logger.error(f"    [Step D] ✗ JSON parsing failed: {e}")
-        logger.error(f"    [Step D] Extracted text: {json_str[:500] if 'json_str' in locals() else 'N/A'}...")
-        logger.error(f"    [Step D] Raw text start: {response_text[:500]}...")
+        
+        # Try simple JSON repair: remove trailing commas
+        try:
+            # Remove trailing commas before } or ]
+            repaired = re.sub(r',(\s*[}\]])', r'\1', json_str)
+            json_instructions = json.loads(repaired)
+            logger.info(f"    [Step D] ✓ JSON repaired (removed trailing commas) and parsed successfully")
+            
+            # Print and save repaired version
+            print("\n" + "="*60)
+            print("🟢 GEMINI AI RESPONSE (REPAIRED)")
+            print("="*60)
+            json_preview = json.dumps(json_instructions, indent=2, ensure_ascii=False)
+            if len(json_preview) > 1000:
+                print(json_preview[:1000] + "... (truncated)")
+            else:
+                print(json_preview)
+            print("="*60 + "\n")
+            
+            return json_instructions
+        except:
+            pass  # Repair failed, continue to error handling
+        
+        # Dump full error response to file for inspection
+        err_file = pptx_path + ".error.txt"
+        try:
+            with open(err_file, "w", encoding="utf-8") as f:
+                f.write("="*80 + "\n")
+                f.write("FULL GEMINI RESPONSE (ERROR CASE)\n")
+                f.write("="*80 + "\n\n")
+                f.write("RAW RESPONSE:\n")
+                f.write(response_text)
+                f.write("\n\n" + "="*80 + "\n")
+                f.write("EXTRACTED JSON STRING:\n")
+                f.write(json_str if 'json_str' in locals() else "N/A")
+                f.write("\n\n" + "="*80 + "\n")
+                f.write(f"ERROR: {str(e)}\n")
+            logger.error(f"    [Step D] Full error response saved to: {err_file}")
+        except Exception as save_err:
+            logger.error(f"    [Step D] Could not save error file: {save_err}")
+        
+        logger.error(f"    [Step D] Extracted text preview: {json_str[:500] if 'json_str' in locals() else 'N/A'}...")
+        logger.error(f"    [Step D] Raw text preview: {response_text[:500]}...")
         
         # Fallback empty
         return {"replacements": [], "charts": []}
     
     except Exception as e:
         logger.error(f"    [Step D] ✗ General error parsing response: {e}")
+        
+        # Also save error response in general error case
+        err_file = pptx_path + ".error.txt"
+        try:
+            with open(err_file, "w", encoding="utf-8") as f:
+                f.write("="*80 + "\n")
+                f.write("FULL GEMINI RESPONSE (GENERAL ERROR)\n")
+                f.write("="*80 + "\n\n")
+                f.write("RAW RESPONSE:\n")
+                f.write(response_text)
+                f.write("\n\n" + "="*80 + "\n")
+                f.write(f"ERROR: {str(e)}\n")
+            logger.error(f"    [Step D] Full error response saved to: {err_file}")
+        except:
+            pass
+        
         return {"replacements": [], "charts": []}

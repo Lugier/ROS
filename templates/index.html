@@ -168,7 +168,7 @@
                     name="prompt" 
                     placeholder="e.g., Adapt this slide for NVIDIA, focus on DACH semiconductors"
                     required
-                ></textarea>
+                >Passe die Slide an für den markt von NVIDIA für Datencenter-Grafikeinheiten im DACH-Raum</textarea>
             </div>
             
             <button type="submit" id="submitBtn">Generate Adapted Presentation</button>
@@ -194,6 +194,15 @@
         const submitBtn = document.getElementById('submitBtn');
         const loading = document.getElementById('loading');
         const error = document.getElementById('error');
+        const promptTextarea = document.getElementById('prompt');
+        
+        // Enter-Taste Handler: Enter sendet das Formular, Shift+Enter erzeugt neue Zeile
+        promptTextarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                form.dispatchEvent(new Event('submit'));
+            }
+        });
         
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -227,8 +236,9 @@
                 window.URL.revokeObjectURL(url);
                 document.body.removeChild(a);
                 
-                // Reset form
+                // Reset form but restore default prompt
                 form.reset();
+                promptTextarea.value = 'Passe die Slide an für den markt von NVIDIA für Datencenter-Grafikeinheiten im DACH-Raum';
                 
             } catch (err) {
                 error.textContent = err.message;
