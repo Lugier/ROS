@@ -88,9 +88,9 @@ def process_presentation():
         # Phase 1: Analyze slide and research content
         phase_start = time.time()
         logger.info("-" * 80)
-        logger.info("PHASE 1/3: Vision Analysis & Research (Gemini 3 Pro Preview)")
+        logger.info("PHASE 1/3: Vision Analysis & Research (Gemini 2.5 Flash)")
         logger.info("  → Loading PPTX and rendering slide to PNG...")
-        logger.info("  → Sending to Gemini 3 Pro Preview with Google Search...")
+        logger.info("  → Sending to Gemini 2.5 Flash with Google Search...")
         logger.info("  → This may take 30-90 seconds depending on research complexity...")
         
         elapsed = time.time() - start_time

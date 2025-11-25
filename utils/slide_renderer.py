@@ -8,62 +8,108 @@ import aspose.pydrawing as drawing
 logger = logging.getLogger(__name__)
 
 
+def normalize_string(s):
+    """Entfernt Whitespace und macht lowercase für besseren Vergleich."""
+    if not s:
+        return ""
+    return " ".join(str(s).split()).lower().strip()
+
+
 def replace_text_in_slide(slide, replacements):
     """
-    Replaces text in slide while preserving formatting.
-    Handles Shapes, Groups, and Tables.
+    Replaces text using 'Paragraph Level' replacement to handle broken portions.
     """
     logger.info(f"      → Processing {len(replacements)} text replacements...")
     replacement_count = 0
 
-    # Helper: Normalize text for comparison (ignore extra spaces)
-    def normalize(s):
-        return ' '.join(s.split()).strip()
+    # Pre-process replacements for faster lookups
+    # Wir nutzen eine Liste von Tupeln für (clean_old, new)
+    clean_replacements = []
+    for r in replacements:
+        old = r.get('old_text_snippet', '')
+        new = r.get('new_text', '')
+        if old and new:
+            # Normalize: lowercase, single spaces
+            clean_old = " ".join(old.split()).lower()
+            clean_replacements.append((clean_old, new))
 
     def process_shape(shape):
         nonlocal replacement_count
 
-        # 1. Handle Text Frames (AutoShapes)
+        # 1. Text Frames
         if hasattr(shape, "text_frame") and shape.text_frame:
             for paragraph in shape.text_frame.paragraphs:
-                for portion in paragraph.portions:
-                    original_text = portion.text
-                    norm_original = normalize(original_text)
+                # Holen wir den GESAMTEN Text des Absatzes
+                full_text = paragraph.text
+                clean_full_text = " ".join(full_text.split()).lower()
 
-                    for replacement in replacements:
-                        old = replacement.get('old_text_snippet', '')
-                        new = replacement.get('new_text', '')
-                        norm_old = normalize(old)
+                # Prüfen gegen alle Ersetzungen
+                for clean_old, new_text in clean_replacements:
+                    # Fuzzy Match: Ist der alte Text (bereinigt) im Absatz enthalten?
+                    # Wir nutzen eine Schwelle von 80% Ähnlichkeit oder Substring
+                    if clean_old in clean_full_text and len(clean_old) > 5:
 
-                        # Check: exact match OR normalized match OR substring match
-                        if old and (old in original_text or norm_old in norm_original):
-                            # Perform replacement on the original text to keep formatting
-                            portion.text = original_text.replace(old, new)
-                            if portion.text == original_text:  # Fallback regex-like replace if simple replace fails
-                                portion.text = new
+                        logger.info(f"        ✓ Match found: '{clean_old[:30]}...' inside '{clean_full_text[:50]}...'")
+
+                        # ACTION: Wir löschen alle Portions und setzen EINE neue.
+                        # Das killt zwar bunte Wörter mitten im Satz, aber garantiert den neuen Text.
+
+                        # 1. Speichere Formatierung der ersten Portion (als "Master Style")
+                        if len(paragraph.portions) > 0:
+                            first_portion = paragraph.portions[0]
+                            # Text setzen
+                            first_portion.text = new_text
+
+                            # 2. Alle anderen Portions löschen (sie sind jetzt obsolet)
+                            # Aspose Python API: portions.remove() oder remove_at()
+                            try:
+                                # Versuche remove_at() falls verfügbar
+                                while len(paragraph.portions) > 1:
+                                    if hasattr(paragraph.portions, 'remove_at'):
+                                        paragraph.portions.remove_at(1)
+                                    else:
+                                        # Fallback: remove() mit Objekt
+                                        paragraph.portions.remove(paragraph.portions[1])
+                            except (AttributeError, IndexError) as e:
+                                # Falls remove_at nicht existiert, nutze remove()
+                                while len(paragraph.portions) > 1:
+                                    paragraph.portions.remove(paragraph.portions[1])
 
                             replacement_count += 1
-                            logger.info(f"        ✓ Replaced: '{old[:20]}...'")
+                            logger.info(f"        ✓ Paragraph replaced: '{new_text[:30]}...'")
+                            break  # Nur eine Ersetzung pro Absatz
 
-        # 2. Handle Groups (Recursion)
+        # 2. Groups
         if isinstance(shape, IGroupShape):
-            for child_shape in shape.shapes:
-                process_shape(child_shape)
+            for child in shape.shapes:
+                process_shape(child)
 
-        # 3. Handle Tables
+        # 3. Tables
         if isinstance(shape, ITable):
             for row in shape.rows:
                 for cell in row:
                     if cell.text_frame:
                         for paragraph in cell.text_frame.paragraphs:
-                            for portion in paragraph.portions:
-                                original_text = portion.text
-                                for replacement in replacements:
-                                    old = replacement.get('old_text_snippet', '')
-                                    new = replacement.get('new_text', '')
-                                    if old and old in original_text:
-                                        portion.text = original_text.replace(old, new)
+                            # Gleiche Logik für Tabellen-Zellen
+                            full_text = paragraph.text
+                            clean_full_text = " ".join(full_text.split()).lower()
+
+                            for clean_old, new_text in clean_replacements:
+                                if clean_old in clean_full_text and len(clean_old) > 5:
+                                    if len(paragraph.portions) > 0:
+                                        paragraph.portions[0].text = new_text
+                                        try:
+                                            while len(paragraph.portions) > 1:
+                                                if hasattr(paragraph.portions, 'remove_at'):
+                                                    paragraph.portions.remove_at(1)
+                                                else:
+                                                    paragraph.portions.remove(paragraph.portions[1])
+                                        except (AttributeError, IndexError):
+                                            while len(paragraph.portions) > 1:
+                                                paragraph.portions.remove(paragraph.portions[1])
                                         replacement_count += 1
+                                        logger.info(f"        ✓ Table Match: '{clean_old[:20]}...'")
+                                        break
 
     for shape in slide.shapes:
         process_shape(shape)
@@ -72,81 +118,45 @@ def replace_text_in_slide(slide, replacements):
 
 
 def hex_to_argb(hex_color):
-    """
-    Converts hex color string (e.g., '#FF5733') to ARGB tuple.
-    
-    Args:
-        hex_color: Hex color string with or without '#'
-        
-    Returns:
-        tuple: (A, R, G, B) values
-    """
-    # Robust handling for None, empty strings, or invalid types
+    """Converts hex color string to ARGB tuple."""
     if not hex_color or not isinstance(hex_color, str):
-        logger.warning(f"Invalid hex_color provided: {hex_color}, using fallback black")
-        return (255, 0, 0, 0)  # Fallback Schwarz
-    
-    hex_color = hex_color.lstrip('#').strip()
-    
-    # Check if empty after stripping
-    if not hex_color:
-        logger.warning("Empty hex_color after stripping, using fallback black")
         return (255, 0, 0, 0)
-    
+    hex_color = hex_color.lstrip('#').strip()
     try:
         if len(hex_color) == 6:
-            r = int(hex_color[0:2], 16)
-            g = int(hex_color[2:4], 16)
-            b = int(hex_color[4:6], 16)
-            return (255, r, g, b)
+            return (255, int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16))
         elif len(hex_color) == 8:
             a = int(hex_color[0:2], 16)
             r = int(hex_color[2:4], 16)
             g = int(hex_color[4:6], 16)
             b = int(hex_color[6:8], 16)
             return (a, r, g, b)
-        else:
-            # Default to black if invalid length
-            logger.warning(f"Invalid hex_color length: {len(hex_color)}, using fallback black")
-            return (255, 0, 0, 0)
-    except (ValueError, IndexError) as e:
-        # Handle invalid hex characters
-        logger.warning(f"Error parsing hex_color '{hex_color}': {e}, using fallback black")
+        return (255, 0, 0, 0)
+    except:
         return (255, 0, 0, 0)
 
 
 def replace_ole_with_chart(slide, shape, chart_data):
-    """
-    Replaces an OLE object (Think-Cell chart) with a native PowerPoint chart.
-    
-    Args:
-        slide: Aspose.Slides ISlide object
-        shape: The OLE object shape to replace
-        chart_data: Dict with 'type', 'title', 'data' keys
-    """
+    """Replaces an OLE object with a native PowerPoint chart."""
     chart_type_str = chart_data.get('type', 'column')
     chart_title = chart_data.get('title', 'Untitled')
     logger.info(f"      → Replacing OLE object with {chart_type_str} chart: '{chart_title}'...")
-    
-    # 1. Position & Size
-    x = shape.x
-    y = shape.y
-    width = shape.width
-    height = shape.height
 
-    # Fallback for 0x0 size (Think-Cell specific issue)
+    # 1. Geometrie
+    x, y, width, height = shape.x, shape.y, shape.width, shape.height
     if width <= 0 or height <= 0:
-        logger.warning("        ⚠️ OLE Object has 0x0 size. Using default fallback size.")
+        # Fallback Size
         slide_width = slide.presentation.slide_size.size.width
         slide_height = slide.presentation.slide_size.size.height
         width = slide_width * 0.8
         height = slide_height * 0.6
         x = (slide_width - width) / 2
         y = (slide_height - height) / 2
+        logger.info(f"        ⚠️ Using fallback size: {width:.0f}x{height:.0f}")
 
     logger.info(f"        Final Chart Rect: X={x:.0f}, Y={y:.0f}, W={width:.0f}, H={height:.0f}")
-    
-    # 2. Chart Type
+
+    # 2. Typ
     c_type_lower = str(chart_type_str).lower()
     if 'bar' in c_type_lower:
         chart_type = slides.charts.ChartType.CLUSTERED_BAR
@@ -154,84 +164,115 @@ def replace_ole_with_chart(slide, shape, chart_data):
         chart_type = slides.charts.ChartType.LINE
     else:
         chart_type = slides.charts.ChartType.CLUSTERED_COLUMN
-    
-    # 3. Remove OLE
-    slide.shapes.remove(shape)
 
-    # 4. Create Native Chart
+    # 3. Delete & Create
+    slide.shapes.remove(shape)
     chart = slide.shapes.add_chart(chart_type, x, y, width, height)
 
-    # 5. Fill Data
+    # 4. Data Fill
     chart_data_obj = chart.chart_data
     workbook = chart_data_obj.chart_data_workbook
 
     chart_data_obj.series.clear()
     chart_data_obj.categories.clear()
 
+    # Debug Data
     categories = chart_data.get('data', {}).get('categories', [])
     series_list = chart_data.get('data', {}).get('series', [])
+    logger.info(f"        Data: {len(categories)} categories, {len(series_list)} series")
 
-    for i, category in enumerate(categories):
-        cell = workbook.get_cell(0, 0, i + 1, str(category))
+    if not categories or not series_list:
+        logger.warning("        ⚠️ No categories or series data provided!")
+
+    # Aspose Chart Data Structure:
+    # Excel-like layout:
+    #      | Col 0      | Col 1 (Ser1) | Col 2 (Ser2)
+    # Row 0| (empty)    | Series 1     | Series 2
+    # Row 1| Category 1 | Value 1.1     | Value 2.1
+    # Row 2| Category 2 | Value 1.2     | Value 2.2
+    #
+    # Categories: Row 1..N, Col 0
+    # Series Names: Row 0, Col 1..N
+    # Values: Row 1..N, Col 1..N
+
+    # Categories (Row 1..N, Col 0)
+    for i, cat in enumerate(categories):
+        # Row = i+1 (start at 1), Col = 0
+        cell = workbook.get_cell(0, i + 1, 0, str(cat))
         chart_data_obj.categories.add(cell)
+        logger.debug(f"        Category {i}: '{cat}' at (row {i+1}, col 0)")
 
-    for series_idx, series_data in enumerate(series_list):
-        series_name = series_data.get('name', f'Series {series_idx + 1}')
-        values = series_data.get('values', [])
-        color_hex = series_data.get('color_hex', '#000000')
+    # Series
+    for series_idx, s_data in enumerate(series_list):
+        s_name = s_data.get('name', f'Series {series_idx + 1}')
+        s_vals = s_data.get('values', [])
+        s_color = s_data.get('color_hex', '#000000')
 
-        series_name_cell = workbook.get_cell(0, series_idx + 1, 0, str(series_name))
+        # Series Name: Row 0, Col = series_idx + 1
+        series_name_cell = workbook.get_cell(0, 0, series_idx + 1, str(s_name))
         series = chart_data_obj.series.add(series_name_cell, chart_type)
+        logger.debug(f"        Series {series_idx}: '{s_name}' at (row 0, col {series_idx + 1})")
 
-        for cat_idx, value in enumerate(values):
+        # Add Values: Row = cat_idx + 1, Col = series_idx + 1
+        for cat_idx, val in enumerate(s_vals):
             if cat_idx < len(categories):
                 try:
-                    val_float = float(value)
-                except:
+                    val_float = float(val)
+                except (ValueError, TypeError):
                     val_float = 0.0
+                    logger.warning(f"        ⚠️ Invalid value '{val}' for category {cat_idx}, using 0.0")
 
-                value_cell = workbook.get_cell(0, series_idx + 1, cat_idx + 1, val_float)
+                # Value Cell: Row = cat_idx + 1, Col = series_idx + 1
+                data_cell = workbook.get_cell(0, cat_idx + 1, series_idx + 1, val_float)
+                logger.debug(f"        Value: {val_float} at (row {cat_idx+1}, col {series_idx+1})")
 
+                # Add Point based on chart type
                 if chart_type == slides.charts.ChartType.LINE:
-                    series.data_points.add_data_point_for_line_series(value_cell)
+                    series.data_points.add_data_point_for_line_series(data_cell)
                 else:
-                    series.data_points.add_data_point_for_bar_series(value_cell)
+                    series.data_points.add_data_point_for_bar_series(data_cell)
 
         # Color
-        series_format = series.format
-        series_format.fill.fill_type = slides.FillType.SOLID
-        a, r, g, b = hex_to_argb(color_hex)
-        series_format.fill.solid_fill_color.color = drawing.Color.from_argb(a, r, g, b)
+        series.format.fill.fill_type = slides.FillType.SOLID
+        a, r, g, b = hex_to_argb(s_color)
+        series.format.fill.solid_fill_color.color = drawing.Color.from_argb(a, r, g, b)
+        logger.debug(f"        Color applied: {s_color} -> ARGB({a}, {r}, {g}, {b})")
 
-    # --- FIX: Chart Title Handling ---
+    # Title
     if chart_data.get('title'):
         chart.has_title = True
         chart.chart_title.add_text_frame_for_overriding(chart_data.get('title'))
+        logger.info(f"        ✓ Chart title set: '{chart_data.get('title')}'")
+
+    # FIX: Chart Style Override (damit es nicht "Default Blau" ist)
+    try:
+        # Versuche einen moderneren Style zu setzen (falls verfügbar)
+        if hasattr(slides.charts, 'ChartStyle'):
+            # Style 11 ist meist ein modernerer, farbenfroherer Style
+            chart.style = slides.charts.ChartStyle.STYLE_11
+            logger.debug("        Chart style set to STYLE_11")
+    except (AttributeError, Exception) as e:
+        # Falls ChartStyle nicht verfügbar ist, ignorieren wir es
+        logger.debug(f"        Could not set chart style (ignoring): {e}")
+
+    logger.info(f"      ✓ Chart created successfully with {len(series_list)} series")
 
 
 def process_slide(pptx_path, output_path, json_instructions):
-    """
-    Main orchestrator that applies all replacements and chart replacements.
-    
-    Args:
-        pptx_path: Path to input PPTX file
-        output_path: Path to save modified PPTX file
-        json_instructions: Dict with 'replacements', 'charts', 'think_cell_replacements'
-    """
-    # Load presentation
+    """Main orchestrator that applies all replacements and chart replacements."""
     step_start = time.time()
     logger.info("      [Step 1] Loading presentation...")
     pres = slides.Presentation(pptx_path)
     slide = pres.slides[0]
     logger.info(f"      [Step 1] ✓ Presentation loaded ({len(pres.slides)} slide(s))")
-    
-    # Apply text replacements
+
+    # Text
     replacements = json_instructions.get('replacements', [])
     if replacements:
         replace_text_in_slide(slide, replacements)
     else:
         logger.info("      → No text replacements to apply")
-    
+
     # Charts
     charts = json_instructions.get('charts', [])
     if charts:
@@ -248,11 +289,11 @@ def process_slide(pptx_path, output_path, json_instructions):
         for i, ole_shape in enumerate(ole_shapes):
             if i < len(charts):
                 replace_ole_with_chart(slide, ole_shape, charts[i])
-    
-    # Save the modified presentation
+    else:
+        logger.info("      → No chart replacements to apply")
+
     logger.info("      [Step 2] Saving modified presentation...")
     pres.save(output_path, slides.export.SaveFormat.PPTX)
     step_time = time.time() - step_start
     file_size = os.path.getsize(output_path)
     logger.info(f"      [Step 2] ✓ Presentation saved in {step_time:.2f}s ({file_size:,} bytes)")
-

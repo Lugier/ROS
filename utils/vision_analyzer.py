@@ -82,50 +82,69 @@ def analyze_slide_and_research(pptx_path, user_prompt):
     logger.info("    [Step C] Configuring Google Search tool...")
     
     try:
-        # Use the new SDK's Tool and GoogleSearch types
-        tool = types.Tool(
-            google_search=types.GoogleSearch()
-        )
+        # Tool Definition
+        tool = types.Tool(google_search=types.GoogleSearch())
         
+        # --- FIX: JSON Mode für Flash DEAKTIVIEREN ---
+        # Wir entfernen response_mime_type="application/json", 
+        # weil Flash das nicht zusammen mit Tools unterstützt.
         config = types.GenerateContentConfig(
             tools=[tool],
-            response_mime_type="application/json"
+            # response_mime_type="application/json"  <-- ENTFERNT für Flash-Kompatibilität!
         )
         
-        logger.info("    [Step C] ✓ Google Search tool configured")
+        logger.info("    [Step C] ✓ Google Search configured (JSON Mode disabled for Flash compatibility)")
         use_google_search = True
         
     except (AttributeError, ImportError, Exception) as e:
-        logger.warning(f"    [Step C] Google Search tool config failed: {e}")
+        logger.warning(f"    [Step C] Config failed: {e}")
         logger.info("    [Step C] Using config without explicit tools (Search may be built-in)")
         
-        # Fallback: config without explicit tools
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json"
-        )
+        # Fallback: config without explicit tools (auch ohne JSON Mode)
+        config = types.GenerateContentConfig()
         use_google_search = False
     
     step_time = time.time() - step_start
     logger.info(f"    [Step B+C] ✓ Configuration completed in {step_time:.2f}s")
     
-    # Step D: Prepare system prompt
+    # Step D: Prepare system prompt (Wir müssen jetzt stärker auf JSON bestehen!)
     system_prompt = f"""You are a Presentation Architect. 
 
-1. Analyze the image visually. Identify colors and chart styles. 
+TASK:
 
-2. Use Google Search to find real-time data for: '{user_prompt}'. 
+1. Visually analyze the slide layout, colors, and charts.
 
-3. Return a JSON object with: 
+2. Research specific data for: '{user_prompt}'.
 
-   - 'replacements': list of {{'old_text_snippet': str, 'new_text': str}}. 
+3. Generate a JSON response to adapt the slide.
 
-   - 'charts': list of {{'type': str (bar/column/line), 'title': str, 'data': {{'categories': [str], 'series': [{{'name': str, 'values': [float], 'color_hex': str}}]}}}}. 
+OUTPUT SCHEMA:
 
-   - 'think_cell_replacements': boolean (if the chart in the image looks like Think-Cell/Waterfall, mark it true).
+You MUST return a valid JSON object. Do NOT write any text outside the JSON block.
+Start with {{ and end with }}.
 
-4. Ensure numbers are accurate based on search.
+JSON Structure:
 
-Return ONLY valid JSON, no markdown formatting, no code blocks."""
+{{
+   "replacements": [
+      {{"old_text_snippet": "exact text to find", "new_text": "new adapted text"}}
+   ],
+   "charts": [
+      {{
+         "type": "bar/column/line", 
+         "title": "Chart Title", 
+         "data": {{
+            "categories": ["2023", "2024"], 
+            "series": [
+               {{"name": "Revenue", "values": [100, 200], "color_hex": "#FF0000"}}
+            ]
+         }}
+      }}
+   ],
+   "think_cell_replacements": true
+}}
+
+CRITICAL: Return ONLY the JSON object. No explanations, no markdown code blocks, no text before or after."""
 
     # Step E: Prepare and send to Gemini
     step_start = time.time()
@@ -138,8 +157,8 @@ Return ONLY valid JSON, no markdown formatting, no code blocks."""
         image_size = f"{image.size[0]}x{image.size[1]}"
         logger.info(f"    [Step D] ✓ Image loaded: {image_size} pixels")
         
-        # Model name - Gemini 3 Pro Preview for best quality
-        model_name = "gemini-3-pro-preview"
+        # Model name - Gemini 2.5 Flash for better availability and speed
+        model_name = "gemini-2.5-flash"
         
         logger.info(f"    [Step D] Using model: {model_name}")
         logger.info("    [Step D] Sending request to Gemini (this may take 30-90s)...")
@@ -185,6 +204,16 @@ Return ONLY valid JSON, no markdown formatting, no code blocks."""
             logger.warning("    [Step D] ⚠️ JSON valid but keys missing (replacements/charts)")
         
         logger.info(f"    [Step D] ✓ JSON parsed successfully ({len(str(json_instructions))} chars)")
+        
+        # --- DEBUG: Save JSON to inspect ---
+        debug_json_path = pptx_path + ".debug.json"
+        try:
+            with open(debug_json_path, "w", encoding="utf-8") as f:
+                json.dump(json_instructions, f, indent=2, ensure_ascii=False)
+            logger.info(f"    [DEBUG] Full Gemini Response saved to: {debug_json_path}")
+        except Exception as e:
+            logger.warning(f"    [DEBUG] Could not save debug JSON: {e}")
+        
         return json_instructions
 
     except json.JSONDecodeError as e:
