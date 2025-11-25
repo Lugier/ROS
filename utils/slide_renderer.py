@@ -130,8 +130,8 @@ def replace_text_in_slide(slide, replacements):
             return ""
         
         # Get text from first paragraph (usually the most important)
-        # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
-        first_para = text_frame.paragraphs[0] if text_frame.paragraphs and text_frame.paragraphs.count > 0 else None
+        # Use len() for collection length
+        first_para = text_frame.paragraphs[0] if text_frame.paragraphs and len(text_frame.paragraphs) > 0 else None
         if not first_para:
             return ""
         
@@ -149,7 +149,7 @@ def replace_text_in_slide(slide, replacements):
             
             # Method 2: If that didn't work, try portions
             # Portions könnten manchmal mehr Text geben, aber auch hier gibt es Limits
-            # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
+            # WICHTIG: portions.count ist eine Property (Integer), keine Methode!
             if not visible_text and first_para.portions and first_para.portions.count > 0:
                 # Iteriere über Portions (max 5 für Performance)
                 portion_texts = []
@@ -281,7 +281,7 @@ def replace_text_in_slide(slide, replacements):
                         pass
                     
                     # Fallback: Versuche Portions (könnte mehr Text geben, aber auch limitiert)
-                    # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
+                    # WICHTIG: portions.count ist eine Property (Integer), keine Methode!
                     if not para_visible and paragraph.portions and paragraph.portions.count > 0:
                         try:
                             # Iteriere über Portions (max 3 für Performance)
@@ -320,7 +320,7 @@ def replace_text_in_slide(slide, replacements):
             if is_match:
                 if matched_paragraph:
                     # Replace specific paragraph (wenn wir den spezifischen Paragraph identifiziert haben)
-                    # WICHTIG: Aspose Collections verwenden .count statt len()
+                    # WICHTIG: portions.count ist eine Property (Integer), keine Methode!
                     if matched_paragraph.portions.count > 0:
                         # Ersetze erste Portion, entferne andere (behält Formatierung)
                         matched_paragraph.portions[0].text = new_text
@@ -340,20 +340,20 @@ def replace_text_in_slide(slide, replacements):
                     logger.info(f"        ✓ Match found ({match_type})!\n          Search: '{orig_old[:50]}...'\n          Found in visible: '{visible_prefix[:50]}...'")
                     
                     # Replace first paragraph with new text, remove others
-                    # WICHTIG: Aspose Collections verwenden .count statt len()
-                    if text_frame.paragraphs.count > 0:
+                    # Use len() for collection length
+                    if len(text_frame.paragraphs) > 0:
                         first_para = text_frame.paragraphs[0]
-                        if first_para.portions.count > 0:
+                        if len(first_para.portions) > 0:
                             # Ersetze erste Portion, entferne andere (behält Formatierung der ersten Portion)
                             first_para.portions[0].text = new_text
-                            while first_para.portions.count > 1:
+                            while len(first_para.portions) > 1:
                                 first_para.portions.remove_at(1)
                         else:
                             # No portions, set text directly
                             first_para.text = new_text
                         
                         # Remove other paragraphs (da wir nur den ersten ersetzen)
-                        while text_frame.paragraphs.count > 1:
+                        while len(text_frame.paragraphs) > 1:
                             text_frame.paragraphs.remove_at(1)
 
                             replacement_count += 1
@@ -409,6 +409,135 @@ def hex_to_argb(hex_color):
         return (255, 0, 0, 0)
     except:
         return (255, 0, 0, 0)
+
+
+def apply_global_substitutions(slide, substitutions):
+    """
+    Führt ein globales Suchen & Ersetzen über alle Textframes durch.
+    Dient als 'Safety Net', falls Gemini spezifische Textboxen übersehen hat.
+    
+    WICHTIG: Diese Funktion durchsucht ALLE Textboxen auf der Slide und ersetzt
+    alle Vorkommen der alten Werte durch neue Werte (z.B. "Mercedes" -> "NVIDIA").
+    """
+    if not substitutions:
+        return 0
+        
+    logger.info(f"      → Running global safety net replacements: {substitutions}")
+    count = 0
+    
+    # Hilfsfunktion zum rekursiven Durchsuchen
+    def check_and_replace(text_frame):
+        nonlocal count
+        if not text_frame or not hasattr(text_frame, 'paragraphs'):
+            return
+        
+        # Aspose Collections sicher iterieren - direkte Iteration statt range(count)
+        for para in text_frame.paragraphs:
+            if not para or not hasattr(para, 'portions'):
+                continue
+            
+            # Iteriere über alle Portions
+            for portion in para.portions:
+                if not hasattr(portion, 'text'):
+                    continue
+                
+                txt = portion.text
+                replaced = False
+                
+                # Führe alle Substitutionen durch
+                for old_val, new_val in substitutions.items():
+                    if old_val and old_val in txt:  # Check if old_val is not empty
+                        # Case-sensitive replace
+                        txt = txt.replace(old_val, new_val)
+                        replaced = True
+                
+                if replaced:
+                    portion.text = txt
+                    count += 1
+                    logger.debug(f"        ✓ Replaced text in portion: '{portion.text[:50]}...'")
+
+    def process_shape_global(shape):
+        if hasattr(shape, "text_frame"):
+            check_and_replace(shape.text_frame)
+        if isinstance(shape, IGroupShape):
+            # FIX: Direkte Iteration statt range(count)
+            for child in shape.shapes:
+                process_shape_global(child)
+        if isinstance(shape, ITable):
+            # FIX: Direkte Iteration statt range(count)
+            for row in shape.rows:
+                for cell in row:
+                    if hasattr(cell, 'text_frame'):
+                        check_and_replace(cell.text_frame)
+
+    # FIX: Nutze direkte Iteration statt range(count)
+    # Das vermeidet den 'builtin_function_or_method' Fehler
+    for shape in slide.shapes:
+        process_shape_global(shape)
+        
+    logger.info(f"      ✓ Global safety net replaced {count} occurrences")
+    return count
+
+
+def update_native_chart_data(chart, chart_data):
+    """
+    Updates data of an EXISTING native PowerPoint chart ensuring style preservation.
+    
+    WICHTIG: Diese Funktion behält das originale Chart-Design (Farben, Schriftarten, Schatten, Layout)
+    und aktualisiert nur die Daten im Excel-Backend. Das Chart-Objekt wird NICHT gelöscht!
+    """
+    logger.info(f"      → Updating existing native chart: '{chart_data.get('title', 'Untitled')}'")
+    
+    wb = chart.chart_data.chart_data_workbook
+    
+    # 1. Daten löschen (aber nicht das Chart!)
+    chart.chart_data.series.clear()
+    chart.chart_data.categories.clear()
+    try:
+        wb.clear(0)
+    except:
+        pass
+    
+    # 2. Neue Kategorien schreiben
+    cats = chart_data.get('data', {}).get('categories', [])
+    for i, cat in enumerate(cats):
+        chart.chart_data.categories.add(wb.get_cell(0, i+1, 0, str(cat)))
+    
+    # 3. Neue Serien hinzufügen
+    series_list = chart_data.get('data', {}).get('series', [])
+    for si, s_data in enumerate(series_list):
+        s_name = s_data.get('name', f'Series {si+1}')
+        s_vals = s_data.get('values', [])
+        
+        # Neue Serie anlegen (übernimmt automatisch den Style des Charts)
+        # WICHTIG: Verwende chart.type (existierender Chart-Type), nicht chart_data.get('type')
+        series = chart.chart_data.series.add(wb.get_cell(0, 0, si+1, str(s_name)), chart.type)
+        
+        for ci, val in enumerate(s_vals):
+            if ci < len(cats):
+                try:
+                    v = float(val)
+                except:
+                    v = 0.0
+                cell = wb.get_cell(0, ci+1, si+1, v)
+                
+                # Datenpunkt hinzufügen passend zum Chart-Typ
+                if chart.type == slides.charts.ChartType.PIE:
+                    series.data_points.add_data_point_for_pie_series(cell)
+                elif chart.type == slides.charts.ChartType.LINE:
+                    series.data_points.add_data_point_for_line_series(cell)
+                else:
+                    series.data_points.add_data_point_for_bar_series(cell)
+    
+    # Titel updaten (falls vorhanden)
+    if chart_data.get('title'):
+        if chart.has_title:
+            chart.chart_title.add_text_frame_for_overriding(chart_data.get('title'))
+        else:
+            chart.has_title = True
+            chart.chart_title.add_text_frame_for_overriding(chart_data.get('title'))
+    
+    logger.info("      ✓ Native chart updated (Design preserved)")
 
 
 def replace_ole_with_chart(slide, shape, chart_data):
@@ -571,7 +700,8 @@ def replace_ole_with_chart(slide, shape, chart_data):
                 logger.warning(f"        ⚠️ API method failed for data point {idx+1}, trying alternative: {e}")
                 # Methode 2: Alternative - direkt über data_points[index]
                 try:
-                    if series.data_points.count > idx:
+                    # Use len() for collection length
+                    if len(series.data_points) > idx:
                         # Falls bereits ein DataPoint existiert, ersetze ihn
                         dp = series.data_points[idx]
                         dp.value.data = data_cell
@@ -592,7 +722,8 @@ def replace_ole_with_chart(slide, shape, chart_data):
         
         # Verify data was set correctly
         if values_added > 0:
-            logger.info(f"        ✓ Verified: Series has {series.data_points.count} data points")
+            # Use len() for collection length
+            logger.info(f"        ✓ Verified: Series has {len(series.data_points)} data points")
         else:
             logger.error(f"        ✗ WARNING: No data points were added to series '{s_info['name']}'!")
         
@@ -681,20 +812,44 @@ def process_slide(pptx_path, output_path, json_instructions):
         for idx, candidate in enumerate(chart_candidates):
             logger.debug(f"        Chart {idx+1}: Position (X={candidate.x:.0f}, Y={candidate.y:.0f})")
 
-        # Match and replace charts
+        # Match and process charts
         # WICHTIG: Die Charts sind jetzt sortiert (Top-Left -> Bottom-Right)
         # Die AI-Daten sollten auch in dieser Reihenfolge sein (laut Prompt)
         # Falls mehr Charts gefunden werden als in JSON, verwenden wir nur die ersten N
-        for i, chart_shape in enumerate(chart_candidates):
+        for i, shape in enumerate(chart_candidates):
             if i < len(charts):
                 chart_data = charts[i]
                 position_hint = chart_data.get('position_hint', 'unknown')
-                logger.info(f"      → Replacing chart {i+1}/{len(chart_candidates)} (AI hint: '{position_hint}') with data from AI...")
-                replace_ole_with_chart(slide, chart_shape, chart_data)
+                
+                # PRÜFUNG: Ist es ein echtes native PowerPoint Chart?
+                is_native_chart = hasattr(shape, 'chart_data') and hasattr(shape, 'chart_type')
+                
+                if is_native_chart:
+                    # ✅ Szenario "Chart-Daten ersetzen": Style bleibt erhalten!
+                    logger.info(f"      → Updating native chart {i+1}/{len(chart_candidates)} (AI hint: '{position_hint}')...")
+                    try:
+                        update_native_chart_data(shape, chart_data)
+                    except Exception as e:
+                        logger.error(f"      ⚠️ Failed to update native chart, falling back to replace: {e}")
+                        replace_ole_with_chart(slide, shape, chart_data)
+                else:
+                    # ✅ Szenario "Bild/Think-Cell": Löschen & Neu bauen
+                    logger.info(f"      → Replacing OLE object {i+1}/{len(chart_candidates)} (AI hint: '{position_hint}') with new chart...")
+                    replace_ole_with_chart(slide, shape, chart_data)
             else:
                 logger.warning(f"      ⚠️ More charts found ({len(chart_candidates)}) than AI provided ({len(charts)})")
     else:
         logger.info("      → No chart replacements to apply")
+
+    # 3. Global Replacements (Safety Net)
+    # WICHTIG: Dies wird NACH allen spezifischen Replacements ausgeführt,
+    # um sicherzustellen, dass keine Firmennamen oder andere Entitäten übersehen wurden
+    glob_subs = json_instructions.get('global_substitutions', {})
+    if glob_subs:
+        logger.info("      → Applying global substitutions (safety net)...")
+        apply_global_substitutions(slide, glob_subs)
+    else:
+        logger.debug("      → No global substitutions provided")
 
     logger.info("      [Step 2] Saving modified presentation...")
     pres.save(output_path, slides.export.SaveFormat.PPTX)
