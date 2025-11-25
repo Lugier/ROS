@@ -1,0 +1,32 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'README.md'
+      - 'docs/**'
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Generate documentation
+      run: |
+        echo "# ROS - Presentation Automation Agent" > docs/index.md
+        echo "" >> docs/index.md
+        echo "Automated documentation generated on $(date)" >> docs/index.md
+        cat README.md >> docs/index.md
+    
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      if: github.ref == 'refs/heads/main'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./docs
+
