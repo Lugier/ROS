@@ -7,6 +7,7 @@ import re
 from aspose.slides import Presentation
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError
 from dotenv import load_dotenv
 import PIL.Image
 
@@ -167,12 +168,47 @@ OUTPUT SCHEMA:
             logger.info("    [Step D] → Executing Google Search for research...")
         logger.info("    [Step D] → Generating JSON instructions...")
         
-        # Send request using new SDK
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[system_prompt, image],
-            config=config
-        )
+        # Send request with retry logic for 500 errors
+        max_retries = 3
+        retry_delay = 2  # Start with 2 seconds
+        response = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[system_prompt, image],
+                    config=config
+                )
+                # Success - break out of retry loop
+                if attempt > 1:
+                    logger.info(f"    [Step D] ✓ Request succeeded on attempt {attempt}")
+                break
+                
+            except ServerError as e:
+                # Check if it's a 500 error
+                error_code = getattr(e, 'status_code', None)
+                error_str = str(e)
+                is_500_error = error_code == 500 or '500' in error_str or 'INTERNAL' in error_str
+                
+                if is_500_error and attempt < max_retries:
+                    wait_time = retry_delay * (2 ** (attempt - 1))  # Exponential backoff: 2s, 4s, 8s
+                    logger.warning(f"    [Step D] ⚠️ Server error 500 (INTERNAL) on attempt {attempt}/{max_retries}, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Not a 500 error, or max retries reached
+                    if attempt >= max_retries:
+                        logger.error(f"    [Step D] ✗ Max retries ({max_retries}) reached. Giving up.")
+                    raise
+            except Exception as e:
+                # For any other exception, don't retry
+                logger.error(f"    [Step D] ✗ Non-retryable error: {type(e).__name__}: {e}")
+                raise
+        
+        # Ensure we got a response
+        if response is None:
+            raise RuntimeError("Failed to get response from Gemini API after all retries")
         
     finally:
         # WICHTIG: Bild explizit schließen, damit Windows den File-Handle freigibt

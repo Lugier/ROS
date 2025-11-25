@@ -170,7 +170,6 @@ def process_presentation():
         
         return jsonify({'error': f'Processing failed: {str(e)}'}), 500
 
-
 if __name__ == '__main__':
     # Debug=True für Debugger, aber use_reloader=False damit langlaufende Requests nicht abgebrochen werden
     app.run(debug=True, use_reloader=False, host='localhost', port=5000)

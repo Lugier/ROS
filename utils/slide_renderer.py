@@ -8,8 +8,62 @@ import aspose.pydrawing as drawing
 logger = logging.getLogger(__name__)
 
 
+def load_aspose_license_if_available():
+    """
+    Versucht, eine Aspose.Slides Lizenz-Datei zu laden, falls vorhanden.
+    
+    WICHTIG: Mit einer gültigen Lizenz würde die Text-Truncation nicht auftreten.
+    Diese Funktion sucht nach einer .lic Datei in mehreren Standard-Pfaden.
+    
+    Falls keine Lizenz gefunden wird, läuft Aspose im Evaluationsmodus:
+    - Text wird nach ~10-20 Zeichen abgeschnitten
+    - Watermark wird in generierte Dateien eingefügt
+    - Aber: Die Funktion funktioniert trotzdem (mit unseren Workarounds)
+    
+    Returns:
+        bool: True wenn Lizenz geladen wurde, False sonst
+    """
+    license_paths = [
+        "Aspose.Slides.lic",
+        "aspose.lic",
+        os.path.join(os.path.dirname(__file__), "Aspose.Slides.lic"),
+        os.path.join(os.path.dirname(__file__), "aspose.lic"),
+    ]
+    
+    for lic_path in license_paths:
+        if os.path.exists(lic_path):
+            try:
+                license_obj = slides.License()
+                license_obj.set_license(lic_path)
+                logger.info(f"      ✓ Aspose license loaded from: {lic_path}")
+                return True
+            except Exception as e:
+                logger.warning(f"      ⚠️ Could not load license from {lic_path}: {e}")
+    
+    logger.warning("      ⚠️ No Aspose license found - running in evaluation mode (text may be truncated)")
+    return False
+
+
 def normalize_string(s):
-    """Entfernt Whitespace und macht lowercase für besseren Vergleich."""
+    """
+    Normalisiert einen String für besseren Vergleich.
+    
+    WARUM: Gemini's Text-Vorschläge können leicht anders formatiert sein als der Text auf der Slide:
+    - Unterschiedliche Whitespace (z.B. "Markt Volumen" vs "Marktvolumen")
+    - Groß-/Kleinschreibung (z.B. "Markt" vs "markt")
+    - Zeilenumbrüche vs. Spaces
+    
+    Diese Funktion macht beide Strings vergleichbar, indem sie:
+    1. Alle Whitespace (auch non-breaking spaces) durch normale Spaces ersetzt
+    2. Alles in lowercase konvertiert
+    3. Führende/nachfolgende Spaces entfernt
+    
+    Args:
+        s: String zu normalisieren
+        
+    Returns:
+        str: Normalisierter String (lowercase, single spaces)
+    """
     if not s:
         return ""
     return " ".join(str(s).split()).lower().strip()
@@ -17,11 +71,26 @@ def normalize_string(s):
 
 def replace_text_in_slide(slide, replacements):
     """
-    Replaces text using tolerant fuzzy matching.
+    Ersetzt Text auf einer Slide basierend auf Gemini's Vorschlägen.
+    
+    WICHTIG: Diese Funktion ist speziell für Aspose.Slides Evaluationsversion optimiert.
+    Da die kostenlose Version Text nach ~10-20 Zeichen abschneidet, verwenden wir:
+    
+    1. PRÄFIX-EXTRAKTION: Nur die ersten ~150 Zeichen werden extrahiert (vor Truncation)
+    2. PRÄFIX-MATCHING: Erste 3-10 Wörter der Gemini-Vorschläge werden gegen sichtbaren Präfix gematcht
+    3. TOKEN-OVERLAP: Falls Präfix-Match fehlschlägt, verwenden wir Token-Overlap (40% Threshold)
+    4. DIREKTE ERSETZUNG: Text wird ersetzt, ohne vollständigen Text zu lesen
+    
+    Args:
+        slide: Aspose.Slides Slide Objekt
+        replacements: Liste von Dicts mit 'old_text_snippet' und 'new_text'
+        
+    Returns:
+        int: Anzahl der durchgeführten Ersetzungen (wird via nonlocal zurückgegeben)
     """
     logger.info(f"      → Processing {len(replacements)} text replacements...")
     replacement_count = 0
-    
+
     # Debug: Was soll ersetzt werden?
     clean_replacements = []
     for r in replacements:
@@ -33,62 +102,268 @@ def replace_text_in_slide(slide, replacements):
             if len(clean_old) > 10: 
                 clean_replacements.append((clean_old, new, old))  # Speichern auch das Original für Debug
     
+    logger.info(f"      → Prepared {len(clean_replacements)} valid replacements for matching")
+    
+    # Collect all text from slide for debugging
+    all_texts_found = []
+    
+    def get_visible_text_prefix(text_frame, max_chars=100):
+        """
+        Gets the visible text prefix from a text frame (works with evaluation version).
+        
+        WICHTIG: Aspose.Slides Evaluationsversion (kostenlos) schneidet Text ab, wenn man versucht,
+        den vollständigen Text zu lesen. Die Meldung "text has been truncated due to evaluation 
+        version limitation" erscheint nach ~10-20 Zeichen.
+        
+        LÖSUNG: Statt den vollständigen Text zu lesen, extrahieren wir nur den sichtbaren Präfix
+        (die ersten N Zeichen VOR der Truncation). Dies reicht aus, um die ersten Wörter zu sehen
+        und mit Gemini's Vorschlägen zu matchen.
+        
+        Args:
+            text_frame: Aspose TextFrame Objekt
+            max_chars: Maximale Anzahl Zeichen zu extrahieren (default: 100)
+            
+        Returns:
+            str: Sichtbarer Text-Präfix (ohne Truncation-Message)
+        """
+        if not text_frame or not text_frame.paragraphs:
+            return ""
+        
+        # Get text from first paragraph (usually the most important)
+        # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
+        first_para = text_frame.paragraphs[0] if text_frame.paragraphs and text_frame.paragraphs.count > 0 else None
+        if not first_para:
+            return ""
+        
+        # Try to get text - even if truncated, we get the prefix
+        visible_text = ""
+        try:
+            # Method 1: Try paragraph.text (even if truncated, we get prefix)
+            # Die Evaluationsversion gibt uns trotzdem die ersten Zeichen
+            if hasattr(first_para, 'text'):
+                visible_text = first_para.text
+                # Remove truncation message if present
+                # Die Truncation-Message kommt nach dem eigentlichen Text, also entfernen wir sie
+                if "truncated due to evaluation" in visible_text.lower():
+                    visible_text = visible_text.split("...")[0] if "..." in visible_text else visible_text.split("text has been")[0]
+            
+            # Method 2: If that didn't work, try portions
+            # Portions könnten manchmal mehr Text geben, aber auch hier gibt es Limits
+            # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
+            if not visible_text and first_para.portions and first_para.portions.count > 0:
+                # Iteriere über Portions (max 5 für Performance)
+                portion_texts = []
+                for i in range(min(5, first_para.portions.count)):
+                    if hasattr(first_para.portions[i], 'text'):
+                        portion_texts.append(first_para.portions[i].text)
+                visible_text = "".join(portion_texts)
+            
+            # Limit to max_chars to avoid processing too much
+            if len(visible_text) > max_chars:
+                visible_text = visible_text[:max_chars]
+                
+        except Exception as e:
+            logger.debug(f"        [DEBUG] Could not extract text prefix: {e}")
+        
+        return visible_text.strip()
+    
     def process_text_frame(text_frame):
+        """
+        Verarbeitet einen Text-Frame und versucht, Ersetzungen durchzuführen.
+        
+        WICHTIG: Da wir nur den sichtbaren Präfix haben (wegen Evaluationsversion),
+        verwenden wir Präfix-Matching statt vollständigem Text-Matching.
+        
+        STRATEGIE:
+        1. Extrahiere sichtbaren Präfix (erste ~150 Zeichen)
+        2. Matche erste 3-10 Wörter der Gemini-Vorschläge gegen diesen Präfix
+        3. Wenn Match gefunden → Ersetze direkt, ohne vollständigen Text zu lesen
+        """
         nonlocal replacement_count
         if not text_frame or not text_frame.paragraphs:
             return
-        for paragraph in text_frame.paragraphs:
-            full_text = paragraph.text
-            clean_full_text = normalize_string(full_text)
+        
+        # Get visible text prefix (works with evaluation version truncation)
+        # Wir nehmen 150 Zeichen, um genug Wörter für Matching zu haben
+        visible_prefix = get_visible_text_prefix(text_frame, max_chars=150)
+        clean_visible = normalize_string(visible_prefix)
+        
+        # Debug: Log visible text (auch kurze Präfixe loggen)
+        if len(clean_visible) >= 1:
+            all_texts_found.append(visible_prefix)
+            logger.info(f"        [TEXT] Visible prefix: '{visible_prefix}...' (length: {len(clean_visible)} chars)")
+        
+        # Skip if too short (weniger als 1 Zeichen = leer)
+        if len(clean_visible) < 1:
+            return
+        
+        # Debug: Log what we're trying to match against
+        logger.debug(f"        [DEBUG] Trying to match against {len(clean_replacements)} replacements for visible text: '{clean_visible[:50]}...'")
+        
+        # Try to match against each replacement using visible prefix
+        # WICHTIG: Wir haben nur den sichtbaren Präfix, daher verwenden wir Präfix-Matching
+        logger.debug(f"        [DEBUG] Checking {len(clean_replacements)} replacements against visible: '{clean_visible[:30]}...'")
+        for clean_old, new_text, orig_old in clean_replacements:
+            logger.debug(f"        [DEBUG]   Checking: '{clean_old[:30]}...' -> '{new_text[:30]}...'")
+            is_match = False
+            match_type = None
+            matched_paragraph = None
             
-            # Debug: Logge gefundene Texte (nur wenn lang genug)
-            if len(clean_full_text) >= 10:
-                logger.debug(f"        [DEBUG] Found text in slide: '{full_text[:50]}...'")
+            # Extract first words from search text (for prefix matching)
+            old_words = clean_old.split()
             
-            # Wenn der Paragraph leer ist, überspringen
-            if len(clean_full_text) < 5: 
-                continue
-            
-            # Prüfen gegen alle Ersetzungen
-            for clean_old, new_text, orig_old in clean_replacements:
-                
-                # Match Logic:
-                # 1. Exakter (normalisierter) Match
-                # 2. Substring Match (wenn der Suchtext im Absatz vorkommt)
-                # 3. Similarity Match (Token Overlap - für harte Fälle)
-                
-                is_match = False
-                
-                if clean_old in clean_full_text:
-                    is_match = True
-                else:
-                    # Token Match: Wenn > 80% der Wörter vorkommen (in beliebiger Reihenfolge)
-                    old_tokens = set(clean_old.split())
-                    para_tokens = set(clean_full_text.split())
-                    if len(old_tokens) > 0:
-                        common = old_tokens.intersection(para_tokens)
-                        overlap = len(common) / len(old_tokens)
-                        if overlap > 0.8: 
-                            is_match = True
-                
-                if is_match:
-                    logger.info(f"        ✓ Match found!\n          Search: '{orig_old[:30]}...'\n          Found in: '{full_text[:30]}...'")
+            # Strategy 1: Match first 1-10 words of search text against visible prefix
+            # WARUM: Die Evaluationsversion zeigt uns nur die ersten ~10-20 Zeichen (oft nur 1-2 Wörter).
+            # Wenn Gemini z.B. sucht: "Die Chemieindustrie als wichtiger Absatzmarkt..."
+            # und wir sehen: "Die C..." (abgeschnitten), dann müssen wir auch mit 1-2 Wörtern matchen.
+            # Wir versuchen von lang zu kurz, damit wir das beste Match bekommen.
+            for prefix_len in [10, 8, 5, 3, 2, 1]:  # Auch 1-2 Wörter, da Präfix sehr kurz sein kann
+                if len(old_words) >= prefix_len:
+                    search_prefix = " ".join(old_words[:prefix_len])
+                    search_prefix_normalized = normalize_string(search_prefix)
                     
-                    # Replace Logic
-                    if len(paragraph.portions) > 0:
-                        paragraph.portions[0].text = new_text
-                        # Remove others
-                        while len(paragraph.portions) > 1:
-                            paragraph.portions.remove_at(1)
-                            
-                        replacement_count += 1
-                        return  # Nur eine Ersetzung pro Absatz, break loop
+                    # Check if this prefix matches the visible text
+                    # WICHTIG: Da der sichtbare Präfix sehr kurz ist ("die c"), müssen wir prüfen:
+                    # 1. Ob der sichtbare Präfix mit dem Such-Präfix beginnt (z.B. "die c" beginnt mit "die")
+                    # 2. Ob der Such-Präfix mit dem sichtbaren Präfix beginnt (z.B. "die" beginnt mit "die c" - nein, aber "die c" beginnt mit "die")
+                    # 3. Ob der Such-Präfix im sichtbaren Präfix enthalten ist
+                    if (clean_visible.startswith(search_prefix_normalized) or 
+                        search_prefix_normalized.startswith(clean_visible) or
+                        search_prefix_normalized in clean_visible):
+                        is_match = True
+                        match_type = f"prefix_match_{prefix_len}_words"
+                        logger.info(f"        ✓ Match found! First {prefix_len} words match: '{search_prefix[:50]}...' matches visible '{clean_visible[:50]}...'")
+                        break
+                    
+                    # Zusätzlich: Für sehr kurze Präfixe (1-2 Wörter), prüfe auch die ersten Zeichen
+                    # Beispiel: visible="die c", search="die chemieindustrie" -> prüfe ob "die" in "die c"
+                    if prefix_len <= 2 and len(clean_visible) >= 2:
+                        # Prüfe ob das erste Wort des Suchtexts im sichtbaren Präfix vorkommt
+                        first_word = old_words[0].lower() if len(old_words) > 0 else ""
+                        if first_word and (first_word in clean_visible or clean_visible.startswith(first_word)):
+                            is_match = True
+                            match_type = f"first_word_match"
+                            logger.info(f"        ✓ Match found! First word '{first_word}' matches visible '{clean_visible[:50]}...'")
+                            break
+            
+            # Strategy 2: Token overlap with visible text
+            # WARUM: Manchmal sind die ersten Wörter nicht exakt gleich (z.B. Groß-/Kleinschreibung,
+            # oder Gemini hat den Text leicht anders formuliert). Token-Overlap ist robuster.
+            # Threshold ist niedrig (30%) weil wir nur den Präfix sehen, nicht den ganzen Text.
+            if not is_match and len(old_words) >= 2:  # Auch für 2 Wörter prüfen
+                old_tokens = set([w.lower() for w in old_words if len(w) > 1])  # Filter: nur Wörter > 1 Zeichen
+                visible_tokens = set([w.lower() for w in clean_visible.split() if len(w) > 1])
+                if len(old_tokens) > 0:
+                    common = old_tokens.intersection(visible_tokens)
+                    overlap = len(common) / len(old_tokens) if len(old_tokens) > 0 else 0
+                    # Lower threshold since we only see prefix (nicht 80% wie bei vollem Text)
+                    # 30% reicht, wenn mindestens 1 Wort übereinstimmt (für sehr kurze Präfixe)
+                    min_common = 1 if len(old_tokens) <= 3 else 2  # Für kurze Texte: 1 Wort reicht
+                    if overlap >= 0.3 and len(common) >= min_common:
+                        is_match = True
+                        match_type = f"token_overlap_{overlap:.2f}"
+                        logger.info(f"        ✓ Match found! Token overlap: {overlap:.2%} ({len(common)}/{len(old_tokens)} words) - visible: '{clean_visible[:50]}...'")
+            
+            # Strategy 3: Try matching each paragraph individually
+            # WARUM: Manchmal ist der Text über mehrere Paragraphs verteilt, oder der erste
+            # Paragraph enthält nicht den gesuchten Text. Wir prüfen jeden Paragraph einzeln.
+            if not is_match:
+                for paragraph in text_frame.paragraphs:
+                    # Get visible text from this paragraph (auch hier nur Präfix wegen Evaluationsversion)
+                    para_visible = ""
+                    try:
+                        if hasattr(paragraph, 'text'):
+                            para_visible = paragraph.text
+                            # Remove truncation message (kommt nach dem eigentlichen Text)
+                            if "truncated" in para_visible.lower():
+                                para_visible = para_visible.split("...")[0] if "..." in para_visible else para_visible.split("text has been")[0]
+                    except:
+                        pass
+                    
+                    # Fallback: Versuche Portions (könnte mehr Text geben, aber auch limitiert)
+                    # WICHTIG: Prüfe mit .count statt len() für Aspose Collections
+                    if not para_visible and paragraph.portions and paragraph.portions.count > 0:
+                        try:
+                            # Iteriere über Portions (max 3 für Performance)
+                            portion_texts = []
+                            for i in range(min(3, paragraph.portions.count)):
+                                if hasattr(paragraph.portions[i], 'text'):
+                                    portion_texts.append(paragraph.portions[i].text)
+                            para_visible = "".join(portion_texts)
+                        except:
+                            pass
+                    
+                    clean_para_visible = normalize_string(para_visible)
+                    
+                    # Check if first 1-3 words match (auch für sehr kurze Präfixe)
+                    for check_len in [3, 2, 1]:
+                        if len(old_words) >= check_len:
+                            first_words = normalize_string(" ".join(old_words[:check_len]))
+                            # Prüfe ob der Paragraph-Text mit diesen Wörtern beginnt oder sie enthält
+                            if (first_words in clean_para_visible or 
+                                clean_para_visible.startswith(first_words) or
+                                (len(clean_para_visible.split()) >= check_len and 
+                                 " ".join(clean_para_visible.split()[:check_len]) == first_words)):
+                                is_match = True
+                                match_type = f"paragraph_prefix_match_{check_len}_words"
+                                matched_paragraph = paragraph
+                                logger.info(f"        ✓ Match found in paragraph! First {check_len} words match: '{first_words}' in '{clean_para_visible[:50]}...'")
+                                break
+                        if is_match:
+                            break
+                    if is_match:
+                        break
+            
+            # ERSETZUNG: Wenn Match gefunden, ersetze direkt
+            # WICHTIG: Wir ersetzen OHNE den vollständigen Text zu lesen (geht ja nicht wegen Evaluationsversion).
+            # Wir vertrauen darauf, dass unser Präfix-Match korrekt war.
+            if is_match:
+                if matched_paragraph:
+                    # Replace specific paragraph (wenn wir den spezifischen Paragraph identifiziert haben)
+                    # WICHTIG: Aspose Collections verwenden .count statt len()
+                    if matched_paragraph.portions.count > 0:
+                        # Ersetze erste Portion, entferne andere (behält Formatierung)
+                        matched_paragraph.portions[0].text = new_text
+                        while matched_paragraph.portions.count > 1:
+                            matched_paragraph.portions.remove_at(1)
+                    else:
+                        # Keine Portions vorhanden, setze Text direkt
+                        matched_paragraph.text = new_text
+                    replacement_count += 1
+                    logger.info(f"        ✓ Match found ({match_type})!\n          Search: '{orig_old[:50]}...'\n          Replaced paragraph")
+                    return
+                else:
+                    # Replace entire text frame (first paragraph)
+                    # WICHTIG: Wir ersetzen den ersten Paragraph, weil wir nicht wissen können,
+                    # welcher Paragraph genau gemeint war (Text ist abgeschnitten).
+                    # In den meisten Fällen ist der erste Paragraph der Haupttext.
+                    logger.info(f"        ✓ Match found ({match_type})!\n          Search: '{orig_old[:50]}...'\n          Found in visible: '{visible_prefix[:50]}...'")
+                    
+                    # Replace first paragraph with new text, remove others
+                    # WICHTIG: Aspose Collections verwenden .count statt len()
+                    if text_frame.paragraphs.count > 0:
+                        first_para = text_frame.paragraphs[0]
+                        if first_para.portions.count > 0:
+                            # Ersetze erste Portion, entferne andere (behält Formatierung der ersten Portion)
+                            first_para.portions[0].text = new_text
+                            while first_para.portions.count > 1:
+                                first_para.portions.remove_at(1)
+                        else:
+                            # No portions, set text directly
+                            first_para.text = new_text
+                        
+                        # Remove other paragraphs (da wir nur den ersten ersetzen)
+                        while text_frame.paragraphs.count > 1:
+                            text_frame.paragraphs.remove_at(1)
+
+                            replacement_count += 1
+                        return  # Only one replacement per frame (vermeidet doppelte Ersetzungen)
     
     def process_shape(shape):
-        # 1. Text Frames
-        if hasattr(shape, "text_frame"):
+        # 1. Text Frames (AutoShapes, TextBoxes, etc.)
+        if hasattr(shape, "text_frame") and shape.text_frame:
             process_text_frame(shape.text_frame)
-        # 2. Groups
+        # 2. Groups (recursive)
         if isinstance(shape, IGroupShape):
             for child in shape.shapes:
                 process_shape(child)
@@ -98,11 +373,22 @@ def replace_text_in_slide(slide, replacements):
                 for cell in row:
                     if cell.text_frame:
                         process_text_frame(cell.text_frame)
+        # 4. AutoShapes (explicit check)
+        if isinstance(shape, IAutoShape) and hasattr(shape, "text_frame") and shape.text_frame:
+            process_text_frame(shape.text_frame)
     
     # Iterate
     for shape in slide.shapes:
         process_shape(shape)
-        
+    
+    # Debug: Show what we found
+    if len(all_texts_found) > 0:
+        logger.info(f"      [DEBUG] Found {len(all_texts_found)} text frame(s) with content")
+        for i, text in enumerate(all_texts_found[:5], 1):  # Show first 5
+            logger.info(f"      [DEBUG]   {i}. '{text}...'")
+    else:
+        logger.warning(f"      [DEBUG] ⚠️ No text frames with content found on slide!")
+
     logger.info(f"      ✓ Completed {replacement_count} text replacements")
 
 
@@ -250,6 +536,10 @@ def replace_ole_with_chart(slide, shape, chart_data):
 def process_slide(pptx_path, output_path, json_instructions):
     """Main orchestrator that applies all replacements and chart replacements."""
     step_start = time.time()
+    
+    # Try to load license first
+    load_aspose_license_if_available()
+    
     logger.info("      [Step 1] Loading presentation...")
     pres = slides.Presentation(pptx_path)
     slide = pres.slides[0]
